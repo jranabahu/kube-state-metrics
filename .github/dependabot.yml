@@ -16,3 +16,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/"
+    target-branch: "main"
+    versioning-strategy: "increase"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-type: "direct"
