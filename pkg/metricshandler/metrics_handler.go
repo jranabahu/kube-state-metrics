@@ -69,24 +69,35 @@ func New(opts *options.Options, kubeClient kubernetes.Interface, storeBuilder ks
 	}
 }
 
-// ConfigureSharding (re-)configures sharding. Re-configuration can be done
-// concurrently.
-func (m *MetricsHandler) ConfigureSharding(ctx context.Context, shard int32, totalShards int) {
+// BuildWriters builds the metrics writers, cancelling any previous context and passing a new one on every build.
+// Build can be used multiple times and concurrently.
+func (m *MetricsHandler) BuildWriters(ctx context.Context) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
 	if m.cancel != nil {
 		m.cancel()
 	}
+	ctx, m.cancel = context.WithCancel(ctx)
+	m.storeBuilder.WithContext(ctx)
+	m.metricsWriters = m.storeBuilder.Build()
+}
+
+// ConfigureSharding configures sharding. Configuration can be used multiple times and
+// concurrently.
+func (m *MetricsHandler) ConfigureSharding(ctx context.Context, shard int32, totalShards int) {
+	m.mtx.Lock()
+
 	if totalShards != 1 {
 		klog.InfoS("Configuring sharding of this instance to be shard index (zero-indexed) out of total shards", "shard", shard, "totalShards", totalShards)
 	}
-	ctx, m.cancel = context.WithCancel(ctx)
-	m.storeBuilder.WithSharding(shard, totalShards)
-	m.storeBuilder.WithContext(ctx)
-	m.metricsWriters = m.storeBuilder.Build()
 	m.curShard = shard
 	m.curTotalShards = totalShards
+	m.storeBuilder.WithSharding(shard, totalShards)
+
+	// unlock because BuildWriters will hold a lock again
+	m.mtx.Unlock()
+	m.BuildWriters(ctx)
 }
 
 // Run configures the MetricsHandler's sharding and if autosharding is enabled
@@ -209,8 +220,22 @@ func (m *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	m.metricsWriters = metricsstore.SanitizeHeaders(string(contentType), m.metricsWriters)
+	m.metricsWriters = metricsstore.SanitizeHeaders(contentType, m.metricsWriters)
+
+	requestedResources := parseResources(r.URL.Query()["resources"])
+	excludedResources := parseResources(r.URL.Query()["exclude_resources"])
+
 	for _, w := range m.metricsWriters {
+		if requestedResources != nil {
+			if _, ok := requestedResources[w.ResourceName]; !ok {
+				continue
+			}
+		}
+		if excludedResources != nil {
+			if _, ok := excludedResources[w.ResourceName]; ok {
+				continue
+			}
+		}
 		err := w.WriteAll(writer)
 		if err != nil {
 			klog.ErrorS(err, "Failed to write metrics")
@@ -232,6 +257,22 @@ func (m *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			klog.ErrorS(err, "Failed to close the writer")
 		}
 	}
+}
+
+func parseResources(params []string) map[string]struct{} {
+	if params == nil {
+		return nil
+	}
+	resMap := make(map[string]struct{})
+	for _, p := range params {
+		for _, res := range strings.Split(p, ",") {
+			res = strings.TrimSpace(res)
+			if res != "" {
+				resMap[res] = struct{}{}
+			}
+		}
+	}
+	return resMap
 }
 
 func shardingSettingsFromStatefulSet(ss *appsv1.StatefulSet, podName string) (nominal int32, totalReplicas int, err error) {

@@ -37,13 +37,15 @@ type MetricsWriterList []*MetricsWriter
 // metrics with the same name coming from different stores end up grouped together.
 // It also ensures that the metric headers are only written out once.
 type MetricsWriter struct {
-	stores []*MetricsStore
+	stores       []*MetricsStore
+	ResourceName string
 }
 
 // NewMetricsWriter creates a new MetricsWriter.
-func NewMetricsWriter(stores ...*MetricsStore) *MetricsWriter {
+func NewMetricsWriter(resourceName string, stores ...*MetricsStore) *MetricsWriter {
 	return &MetricsWriter{
-		stores: stores,
+		stores:       stores,
+		ResourceName: resourceName,
 	}
 }
 
@@ -56,31 +58,35 @@ func (m MetricsWriter) WriteAll(w io.Writer) error {
 		return nil
 	}
 
-	for _, s := range m.stores {
-		s.mutex.RLock()
-		defer func(s *MetricsStore) {
-			s.mutex.RUnlock()
-		}(s)
-	}
-
 	for i, help := range m.stores[0].headers {
 		if help != "" && help != "\n" {
 			help += "\n"
 		}
 
-		if len(m.stores[0].metrics) > 0 {
-			_, err := w.Write([]byte(help))
+		var err error
+		m.stores[0].metrics.Range(func(_ interface{}, _ interface{}) bool {
+			_, err = w.Write([]byte(help))
 			if err != nil {
-				return fmt.Errorf("failed to write help text: %v", err)
+				err = fmt.Errorf("failed to write help text: %v", err)
 			}
+			return false
+		})
+		if err != nil {
+			return err
 		}
 
 		for _, s := range m.stores {
-			for _, metricFamilies := range s.metrics {
-				_, err := w.Write(metricFamilies[i])
+			s.metrics.Range(func(_ interface{}, value interface{}) bool {
+				metricFamilies := value.([][]byte)
+				_, err = w.Write(metricFamilies[i])
 				if err != nil {
-					return fmt.Errorf("failed to write metrics family: %v", err)
+					err = fmt.Errorf("failed to write metrics family: %v", err)
+					return false
 				}
+				return true
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -88,7 +94,7 @@ func (m MetricsWriter) WriteAll(w io.Writer) error {
 }
 
 // SanitizeHeaders sanitizes the headers of the given MetricsWriterList.
-func SanitizeHeaders(contentType string, writers MetricsWriterList) MetricsWriterList {
+func SanitizeHeaders(contentType expfmt.Format, writers MetricsWriterList) MetricsWriterList {
 	var lastHeader string
 	for _, writer := range writers {
 		if len(writer.stores) > 0 {
@@ -100,8 +106,9 @@ func SanitizeHeaders(contentType string, writers MetricsWriterList) MetricsWrite
 				// Skip this step if we encounter a repeated header, as it will be removed.
 				if header != lastHeader && strings.HasPrefix(header, "# HELP") {
 
-					// If the requested content type was proto-based (such as FmtProtoDelim, FmtProtoText, or FmtProtoCompact), replace "info" and "statesets" with "gauge", as they are not recognized by Prometheus' protobuf machinery.
-					if strings.HasPrefix(contentType, expfmt.ProtoType) {
+					// If the requested content type is text/plain, replace "info" and "statesets" with "gauge", as they are not recognized by Prometheus' plain text machinery.
+					// When Prometheus requests proto-based formats, this branch is also used because any requested format that is not OpenMetrics falls back to text/plain in metrics_handler.go
+					if contentType.FormatType() == expfmt.TypeTextPlain {
 						infoTypeString := string(metric.Info)
 						stateSetTypeString := string(metric.StateSet)
 						if strings.HasSuffix(header, infoTypeString) {

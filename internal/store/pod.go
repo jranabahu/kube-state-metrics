@@ -92,6 +92,7 @@ func podMetricFamilies(allowAnnotationsList, allowLabelsList []string) []generat
 		createPodStatusScheduledFamilyGenerator(),
 		createPodStatusScheduledTimeFamilyGenerator(),
 		createPodStatusUnschedulableFamilyGenerator(),
+		createPodStatusUnscheduledTimeFamilyGenerator(),
 		createPodTolerationsFamilyGenerator(),
 		createPodNodeSelectorsFamilyGenerator(),
 		createPodServiceAccountFamilyGenerator(),
@@ -169,7 +170,7 @@ func createPodContainerResourceLimitsFamilyGenerator() generator.FamilyGenerator
 		"kube_pod_container_resource_limits",
 		"The number of requested limit resource by a container. It is recommended to use the kube_pod_resource_limits metric exposed by kube-scheduler instead, as it is more precise.",
 		metric.Gauge,
-		basemetrics.ALPHA,
+		basemetrics.STABLE,
 		"",
 		wrapPodFunc(func(p *v1.Pod) *metric.Family {
 			ms := []*metric.Metric{}
@@ -182,7 +183,7 @@ func createPodContainerResourceLimitsFamilyGenerator() generator.FamilyGenerator
 					case v1.ResourceCPU:
 						ms = append(ms, &metric.Metric{
 							LabelValues: []string{c.Name, p.Spec.NodeName, SanitizeLabelName(string(resourceName)), string(constant.UnitCore)},
-							Value:       float64(val.MilliValue()) / 1000,
+							Value:       convertValueToFloat64(&val),
 						})
 					case v1.ResourceStorage:
 						fallthrough
@@ -233,7 +234,7 @@ func createPodContainerResourceRequestsFamilyGenerator() generator.FamilyGenerat
 		"kube_pod_container_resource_requests",
 		"The number of requested request resource by a container. It is recommended to use the kube_pod_resource_requests metric exposed by kube-scheduler instead, as it is more precise.",
 		metric.Gauge,
-		basemetrics.ALPHA,
+		basemetrics.STABLE,
 		"",
 		wrapPodFunc(func(p *v1.Pod) *metric.Family {
 			ms := []*metric.Metric{}
@@ -246,7 +247,7 @@ func createPodContainerResourceRequestsFamilyGenerator() generator.FamilyGenerat
 					case v1.ResourceCPU:
 						ms = append(ms, &metric.Metric{
 							LabelValues: []string{c.Name, p.Spec.NodeName, SanitizeLabelName(string(resourceName)), string(constant.UnitCore)},
-							Value:       float64(val.MilliValue()) / 1000,
+							Value:       convertValueToFloat64(&val),
 						})
 					case v1.ResourceStorage:
 						fallthrough
@@ -749,7 +750,7 @@ func createPodInitContainerResourceLimitsFamilyGenerator() generator.FamilyGener
 					case v1.ResourceCPU:
 						ms = append(ms, &metric.Metric{
 							LabelValues: []string{c.Name, p.Spec.NodeName, SanitizeLabelName(string(resourceName)), string(constant.UnitCore)},
-							Value:       float64(val.MilliValue()) / 1000,
+							Value:       convertValueToFloat64(&val),
 						})
 					case v1.ResourceStorage:
 						fallthrough
@@ -813,7 +814,7 @@ func createPodInitContainerResourceRequestsFamilyGenerator() generator.FamilyGen
 					case v1.ResourceCPU:
 						ms = append(ms, &metric.Metric{
 							LabelValues: []string{c.Name, p.Spec.NodeName, SanitizeLabelName(string(resourceName)), string(constant.UnitCore)},
-							Value:       float64(val.MilliValue()) / 1000,
+							Value:       convertValueToFloat64(&val),
 						})
 					case v1.ResourceStorage:
 						fallthrough
@@ -1122,7 +1123,7 @@ func createPodOverheadCPUCoresFamilyGenerator() generator.FamilyGenerator {
 				for resourceName, val := range p.Spec.Overhead {
 					if resourceName == v1.ResourceCPU {
 						ms = append(ms, &metric.Metric{
-							Value: float64(val.MilliValue()) / 1000,
+							Value: convertValueToFloat64(&val),
 						})
 					}
 				}
@@ -1541,15 +1542,12 @@ func createPodStatusReasonFamilyGenerator() generator.FamilyGenerator {
 			ms := []*metric.Metric{}
 
 			for _, reason := range podStatusReasons {
-				metric := &metric.Metric{}
-				metric.LabelKeys = []string{"reason"}
-				metric.LabelValues = []string{reason}
-				if p.Status.Reason == reason {
-					metric.Value = boolFloat64(true)
-				} else {
-					metric.Value = boolFloat64(false)
+				m := &metric.Metric{
+					LabelKeys:   []string{"reason"},
+					LabelValues: []string{reason},
+					Value:       getPodStatusReasonValue(p, reason),
 				}
-				ms = append(ms, metric)
+				ms = append(ms, m)
 			}
 
 			return &metric.Family{
@@ -1557,6 +1555,23 @@ func createPodStatusReasonFamilyGenerator() generator.FamilyGenerator {
 			}
 		}),
 	)
+}
+
+func getPodStatusReasonValue(p *v1.Pod, reason string) float64 {
+	if p.Status.Reason == reason {
+		return 1
+	}
+	for _, cond := range p.Status.Conditions {
+		if cond.Reason == reason {
+			return 1
+		}
+	}
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.State.Terminated != nil && cs.State.Terminated.Reason == reason {
+			return 1
+		}
+	}
+	return 0
 }
 
 func createPodStatusScheduledFamilyGenerator() generator.FamilyGenerator {
@@ -1642,6 +1657,69 @@ func createPodStatusUnschedulableFamilyGenerator() generator.FamilyGenerator {
 	)
 }
 
+func createPodStatusUnscheduledTimeFamilyGenerator() generator.FamilyGenerator {
+	return *generator.NewFamilyGeneratorWithStability(
+		"kube_pod_status_unscheduled_time",
+		"Unix timestamp when pod moved into unscheduled status",
+		metric.Gauge,
+		basemetrics.ALPHA,
+		"",
+		wrapPodFunc(func(p *v1.Pod) *metric.Family {
+			ms := []*metric.Metric{}
+
+			for _, c := range p.Status.Conditions {
+				if c.Type == v1.PodScheduled && c.Status == v1.ConditionFalse {
+					ms = append(ms, &metric.Metric{
+						LabelKeys:   []string{},
+						LabelValues: []string{},
+						Value:       float64(c.LastTransitionTime.Unix()),
+					})
+				}
+			}
+
+			return &metric.Family{
+				Metrics: ms,
+			}
+		}),
+	)
+}
+
+// getUniqueTolerations takes a v1.Toleration array and returns a deduplicated slice of tolerations based on a stable identity key.
+// v1.Toleration contains a pointer field (TolerationSeconds), so we avoid relying on direct struct comparison.
+// getUniqueTolerations returns a deduplicated slice of tolerations based on a stable identity key.
+// v1.Toleration contains a pointer field (TolerationSeconds), so we avoid relying on direct struct comparison.
+func getUniqueTolerations(tolerations []v1.Toleration) []v1.Toleration {
+	type tolerationKey struct {
+		Key      string
+		Operator string
+		Value    string
+		Effect   string
+		Seconds  string
+	}
+
+	uniqueTolerationsMap := make(map[tolerationKey]struct{})
+	uniqueTolerations := make([]v1.Toleration, 0)
+
+	for _, t := range tolerations {
+		var seconds string
+		if t.TolerationSeconds != nil {
+			seconds = strconv.FormatInt(*t.TolerationSeconds, 10)
+		}
+		key := tolerationKey{
+			Key:      t.Key,
+			Operator: string(t.Operator),
+			Value:    t.Value,
+			Effect:   string(t.Effect),
+			Seconds:  seconds,
+		}
+		if _, exists := uniqueTolerationsMap[key]; !exists {
+			uniqueTolerationsMap[key] = struct{}{}
+			uniqueTolerations = append(uniqueTolerations, t)
+		}
+	}
+	return uniqueTolerations
+}
+
 func createPodTolerationsFamilyGenerator() generator.FamilyGenerator {
 	return *generator.NewFamilyGeneratorWithStability(
 		"kube_pod_tolerations",
@@ -1651,43 +1729,29 @@ func createPodTolerationsFamilyGenerator() generator.FamilyGenerator {
 		"",
 		wrapPodFunc(func(p *v1.Pod) *metric.Family {
 			var ms []*metric.Metric
+			uniqueTolerations := getUniqueTolerations(p.Spec.Tolerations)
 
-			for _, t := range p.Spec.Tolerations {
-				var labelKeys []string
-				var labelValues []string
+			for _, t := range uniqueTolerations {
+				var key, operator, value, effect, tolerationSeconds string
 
-				if t.Key != "" {
-					labelKeys = append(labelKeys, "key")
-					labelValues = append(labelValues, t.Key)
-				}
-
+				key = t.Key
 				if t.Operator != "" {
-					labelKeys = append(labelKeys, "operator")
-					labelValues = append(labelValues, string(t.Operator))
+					operator = string(t.Operator)
 				}
 
-				if t.Value != "" {
-					labelKeys = append(labelKeys, "value")
-					labelValues = append(labelValues, t.Value)
-				}
+				value = t.Value
 
 				if t.Effect != "" {
-					labelKeys = append(labelKeys, "effect")
-					labelValues = append(labelValues, string(t.Effect))
+					effect = string(t.Effect)
 				}
 
 				if t.TolerationSeconds != nil {
-					labelKeys = append(labelKeys, "toleration_seconds")
-					labelValues = append(labelValues, strconv.FormatInt(*t.TolerationSeconds, 10))
-				}
-
-				if len(labelKeys) == 0 {
-					continue
+					tolerationSeconds = strconv.FormatInt(*t.TolerationSeconds, 10)
 				}
 
 				ms = append(ms, &metric.Metric{
-					LabelKeys:   labelKeys,
-					LabelValues: labelValues,
+					LabelKeys:   []string{"key", "operator", "value", "effect", "toleration_seconds"},
+					LabelValues: []string{key, operator, value, effect, tolerationSeconds},
 					Value:       1,
 				})
 			}

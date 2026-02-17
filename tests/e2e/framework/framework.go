@@ -28,6 +28,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
 const (
@@ -118,7 +119,7 @@ func (k *KSMClient) IsHealthz() (bool, error) {
 
 func (k *KSMClient) writeMetrics(endpoint *url.URL, w io.Writer) error {
 	if endpoint == nil {
-		return errors.New("Endpoint is nil")
+		return errors.New("endpoint is nil")
 	}
 
 	u := *endpoint
@@ -165,9 +166,38 @@ func (f *Framework) ParseMetrics(metrics func(io.Writer) error) (map[string]*dto
 	buf := &bytes.Buffer{}
 	err := metrics(buf)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to get metrics: %w", err)
+		return nil, fmt.Errorf("failed to get metrics: %w", err)
 	}
 
-	parser := &expfmt.TextParser{}
+	parser := expfmt.NewTextParser(model.UTF8Validation)
 	return parser.TextToMetricFamilies(buf)
+}
+
+// HasMetricWithLabels checks if a metric with specific labels exists.
+func (f *Framework) HasMetricWithLabels(metricName string, labels map[string]string) (bool, error) {
+	metricFamilies, err := f.ParseMetrics(f.KsmClient.Metrics)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse metrics: %w", err)
+	}
+
+	family, ok := metricFamilies[metricName]
+	if !ok {
+		return false, nil
+	}
+
+	for _, metric := range family.Metric {
+		matchCount := 0
+		for _, label := range metric.Label {
+			if expectedValue, exists := labels[label.GetName()]; exists {
+				if label.GetValue() == expectedValue {
+					matchCount++
+				}
+			}
+		}
+		if matchCount == len(labels) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

@@ -66,6 +66,8 @@ func hpaMetricFamilies(allowAnnotationsList, allowLabelsList []string) []generat
 		createHPAAnnotations(allowAnnotationsList),
 		createHPALabels(allowLabelsList),
 		createHPAStatusCondition(),
+		createHPACreated(),
+		createHPADeletionTimestamp(),
 	}
 }
 
@@ -134,7 +136,7 @@ func createHPAMetaDataGeneration() generator.FamilyGenerator {
 			return &metric.Family{
 				Metrics: []*metric.Metric{
 					{
-						Value: float64(a.ObjectMeta.Generation),
+						Value: float64(a.Generation),
 					},
 				},
 			}
@@ -217,10 +219,10 @@ func createHPASpecTargetMetric() generator.FamilyGenerator {
 				}
 
 				if metricTarget.Value != nil {
-					metricMap[value] = float64(metricTarget.Value.MilliValue()) / 1000
+					metricMap[value] = convertValueToFloat64(metricTarget.Value)
 				}
 				if metricTarget.AverageValue != nil {
-					metricMap[average] = float64(metricTarget.AverageValue.MilliValue()) / 1000
+					metricMap[average] = convertValueToFloat64(metricTarget.AverageValue)
 				}
 				if metricTarget.AverageUtilization != nil {
 					metricMap[utilization] = float64(*metricTarget.AverageUtilization)
@@ -244,7 +246,7 @@ func createHPAStatusTargetMetric() generator.FamilyGenerator {
 		"kube_horizontalpodautoscaler_status_target_metric",
 		"The current metric status used by this autoscaler when calculating the desired replica count.",
 		metric.Gauge,
-		basemetrics.ALPHA,
+		basemetrics.STABLE,
 		"",
 		wrapHPAFunc(func(a *autoscaling.HorizontalPodAutoscaler) *metric.Family {
 			ms := make([]*metric.Metric, 0, len(a.Status.CurrentMetrics))
@@ -276,10 +278,10 @@ func createHPAStatusTargetMetric() generator.FamilyGenerator {
 				}
 
 				if currentMetric.Value != nil {
-					metricMap[value] = float64(currentMetric.Value.MilliValue()) / 1000
+					metricMap[value] = convertValueToFloat64(currentMetric.Value)
 				}
 				if currentMetric.AverageValue != nil {
-					metricMap[average] = float64(currentMetric.AverageValue.MilliValue()) / 1000
+					metricMap[average] = convertValueToFloat64(currentMetric.AverageValue)
 				}
 				if currentMetric.AverageUtilization != nil {
 					metricMap[utilization] = float64(*currentMetric.AverageUtilization)
@@ -405,6 +407,52 @@ func createHPAStatusCondition() generator.FamilyGenerator {
 					metric.LabelValues = append([]string{string(c.Type)}, metric.LabelValues...)
 					ms = append(ms, metric)
 				}
+			}
+
+			return &metric.Family{
+				Metrics: ms,
+			}
+		}),
+	)
+}
+
+func createHPACreated() generator.FamilyGenerator {
+	return *generator.NewFamilyGeneratorWithStability(
+		"kube_horizontalpodautoscaler_created",
+		"Unix creation timestamp",
+		metric.Gauge,
+		basemetrics.ALPHA,
+		"",
+		wrapHPAFunc(func(a *autoscaling.HorizontalPodAutoscaler) *metric.Family {
+			ms := []*metric.Metric{}
+
+			if !a.CreationTimestamp.IsZero() {
+				ms = append(ms, &metric.Metric{
+					Value: float64(a.CreationTimestamp.Unix()),
+				})
+			}
+
+			return &metric.Family{
+				Metrics: ms,
+			}
+		}),
+	)
+}
+
+func createHPADeletionTimestamp() generator.FamilyGenerator {
+	return *generator.NewFamilyGeneratorWithStability(
+		"kube_horizontalpodautoscaler_deletion_timestamp",
+		"Unix deletion timestamp",
+		metric.Gauge,
+		basemetrics.ALPHA,
+		"",
+		wrapHPAFunc(func(a *autoscaling.HorizontalPodAutoscaler) *metric.Family {
+			ms := []*metric.Metric{}
+
+			if !a.DeletionTimestamp.IsZero() {
+				ms = append(ms, &metric.Metric{
+					Value: float64(a.DeletionTimestamp.Unix()),
+				})
 			}
 
 			return &metric.Family{

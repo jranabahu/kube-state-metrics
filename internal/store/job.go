@@ -26,6 +26,7 @@ import (
 	generator "k8s.io/kube-state-metrics/v2/pkg/metric_generator"
 
 	v1batch "k8s.io/api/batch/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -266,6 +267,26 @@ func jobMetricFamilies(allowAnnotationsList, allowLabelsList []string) []generat
 			}),
 		),
 		*generator.NewFamilyGeneratorWithStability(
+			"kube_job_status_ready",
+			"The number of ready pods that belong to this Job.",
+			metric.Gauge,
+			basemetrics.ALPHA,
+			"",
+			wrapJobFunc(func(j *v1batch.Job) *metric.Family {
+				value := float64(0)
+				if j.Status.Ready != nil {
+					value = float64(*j.Status.Ready)
+				}
+				return &metric.Family{
+					Metrics: []*metric.Metric{
+						{
+							Value: value,
+						},
+					},
+				}
+			}),
+		),
+		*generator.NewFamilyGeneratorWithStability(
 			"kube_job_complete",
 			"The job has completed its execution.",
 			metric.Gauge,
@@ -348,6 +369,27 @@ func jobMetricFamilies(allowAnnotationsList, allowLabelsList []string) []generat
 
 						Value: float64(j.Status.CompletionTime.Unix()),
 					})
+				}
+
+				return &metric.Family{
+					Metrics: ms,
+				}
+			}),
+		),
+		*generator.NewFamilyGeneratorWithStability(
+			"kube_job_status_suspended",
+			"The number of pods which reached Phase Suspended.",
+			metric.Gauge,
+			basemetrics.ALPHA,
+			"",
+			wrapJobFunc(func(j *v1batch.Job) *metric.Family {
+				ms := []*metric.Metric{}
+				for _, c := range j.Status.Conditions {
+					if c.Type == v1batch.JobSuspended {
+						ms = append(ms, &metric.Metric{
+							Value: boolFloat64(c.Status == v1.ConditionTrue),
+						})
+					}
 				}
 
 				return &metric.Family{

@@ -39,12 +39,16 @@ type kindPlural struct {
 type CRDiscoverer struct {
 	// CRDsAddEventsCounter tracks the number of times that the CRD informer triggered the "add" event.
 	CRDsAddEventsCounter prometheus.Counter
+	// CRDsUpdateEventsCounter tracks the number of times that the CRD informer triggered the "update" event.
+	CRDsUpdateEventsCounter prometheus.Counter
 	// CRDsDeleteEventsCounter tracks the number of times that the CRD informer triggered the "remove" event.
 	CRDsDeleteEventsCounter prometheus.Counter
 	// CRDsCacheCountGauge tracks the net amount of CRDs affecting the cache at this point.
 	CRDsCacheCountGauge prometheus.Gauge
 	// Map is a cache of the collected GVKs.
 	Map map[string]map[string][]kindPlural
+	// GVKToReflectorStopChanMap is a map of GVKs to channels that can be used to stop their corresponding reflector.
+	GVKToReflectorStopChanMap map[string]chan struct{}
 	// m is a mutex to protect the cache.
 	m sync.RWMutex
 	// ShouldUpdate is a flag that indicates whether the cache was updated.
@@ -70,6 +74,9 @@ func (r *CRDiscoverer) AppendToMap(gvkps ...groupVersionKindPlural) {
 	if r.Map == nil {
 		r.Map = map[string]map[string][]kindPlural{}
 	}
+	if r.GVKToReflectorStopChanMap == nil {
+		r.GVKToReflectorStopChanMap = map[string]chan struct{}{}
+	}
 	for _, gvkp := range gvkps {
 		if _, ok := r.Map[gvkp.Group]; !ok {
 			r.Map[gvkp.Group] = map[string][]kindPlural{}
@@ -78,6 +85,7 @@ func (r *CRDiscoverer) AppendToMap(gvkps ...groupVersionKindPlural) {
 			r.Map[gvkp.Group][gvkp.Version] = []kindPlural{}
 		}
 		r.Map[gvkp.Group][gvkp.Version] = append(r.Map[gvkp.Group][gvkp.Version], kindPlural{Kind: gvkp.Kind, Plural: gvkp.Plural})
+		r.GVKToReflectorStopChanMap[gvkp.GroupVersionKind.String()] = make(chan struct{})
 	}
 }
 
@@ -92,6 +100,10 @@ func (r *CRDiscoverer) RemoveFromMap(gvkps ...groupVersionKindPlural) {
 		}
 		for i, el := range r.Map[gvkp.Group][gvkp.Version] {
 			if el.Kind == gvkp.Kind {
+				if _, ok := r.GVKToReflectorStopChanMap[gvkp.GroupVersionKind.String()]; ok {
+					close(r.GVKToReflectorStopChanMap[gvkp.GroupVersionKind.String()])
+					delete(r.GVKToReflectorStopChanMap, gvkp.GroupVersionKind.String())
+				}
 				if len(r.Map[gvkp.Group][gvkp.Version]) == 1 {
 					delete(r.Map[gvkp.Group], gvkp.Version)
 					if len(r.Map[gvkp.Group]) == 0 {

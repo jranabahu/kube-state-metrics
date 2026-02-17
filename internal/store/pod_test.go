@@ -1761,8 +1761,8 @@ func TestPodStore(t *testing.T) {
 				},
 			},
 			Want: `
-				# HELP kube_pod_container_resource_limits The number of requested limit resource by a container. It is recommended to use the kube_pod_resource_limits metric exposed by kube-scheduler instead, as it is more precise.
-				# HELP kube_pod_container_resource_requests The number of requested request resource by a container. It is recommended to use the kube_pod_resource_requests metric exposed by kube-scheduler instead, as it is more precise.
+				# HELP kube_pod_container_resource_limits [STABLE] The number of requested limit resource by a container. It is recommended to use the kube_pod_resource_limits metric exposed by kube-scheduler instead, as it is more precise.
+				# HELP kube_pod_container_resource_requests [STABLE] The number of requested request resource by a container. It is recommended to use the kube_pod_resource_requests metric exposed by kube-scheduler instead, as it is more precise.
 				# HELP kube_pod_init_container_resource_limits The number of requested limit resource by an init container.
 				# HELP kube_pod_init_container_resource_requests The number of requested request resource by an init container.
 				# HELP kube_pod_init_container_status_last_terminated_reason Describes the last reason the init container was in terminated state.
@@ -2115,6 +2115,12 @@ func TestPodStore(t *testing.T) {
 							Value:    "value3",
 						},
 						{
+							// Duplicate toleration, to ensure that doesn't result in a duplicate metric
+							Key:      "key3",
+							Operator: v1.TolerationOpEqual,
+							Value:    "value3",
+						},
+						{
 							// an empty toleration to ensure that an empty toleration does not result in a metric
 						},
 					},
@@ -2123,9 +2129,10 @@ func TestPodStore(t *testing.T) {
 			Want: `
 				# HELP kube_pod_tolerations Information about the pod tolerations
 				# TYPE kube_pod_tolerations gauge
-				kube_pod_tolerations{namespace="ns1",pod="pod1",uid="uid1",key="key1",operator="Equal",value="value1",effect="NoSchedule"} 1
-				kube_pod_tolerations{namespace="ns1",pod="pod1",uid="uid1",key="key2",operator="Exists"} 1
-				kube_pod_tolerations{namespace="ns1",pod="pod1",uid="uid1",key="key3",operator="Equal",value="value3"} 1
+				kube_pod_tolerations{effect="",key="",namespace="ns1",operator="",pod="pod1",toleration_seconds="",uid="uid1",value=""} 1
+				kube_pod_tolerations{effect="",key="key2",namespace="ns1",operator="Exists",pod="pod1",toleration_seconds="",uid="uid1",value=""} 1
+				kube_pod_tolerations{effect="",key="key3",namespace="ns1",operator="Equal",pod="pod1",toleration_seconds="",uid="uid1",value="value3"} 1
+				kube_pod_tolerations{effect="NoSchedule",key="key1",namespace="ns1",operator="Equal",pod="pod1",toleration_seconds="",uid="uid1",value="value1"} 1
 			`,
 			MetricNames: []string{
 				"kube_pod_tolerations",
@@ -2275,11 +2282,181 @@ func BenchmarkPodStore(b *testing.B) {
 		},
 	}
 
-	expectedFamilies := 54
+	expectedFamilies := 55
 	for n := 0; n < b.N; n++ {
 		families := f(pod)
 		if len(families) != expectedFamilies {
 			b.Fatalf("expected %d but got %v", expectedFamilies, len(families))
 		}
+	}
+}
+
+func TestGetPodStatusReasonValue(t *testing.T) {
+	reason := "TestReason"
+
+	tests := []struct {
+		name string
+		pod  *v1.Pod
+		want float64
+	}{
+		{
+			name: "matches Status.Reason",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Reason: "TestReason",
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "matches condition Reason",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Conditions: []v1.PodCondition{
+						{
+							Reason: "TestReason",
+						},
+					},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "matches container terminated Reason",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					ContainerStatuses: []v1.ContainerStatus{
+						{
+							State: v1.ContainerState{
+								Terminated: &v1.ContainerStateTerminated{
+									Reason: "TestReason",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "no match returns 0",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Reason: "OtherReason",
+					Conditions: []v1.PodCondition{
+						{
+							Reason: "NotTestReason",
+						},
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						{
+							State: v1.ContainerState{
+								Terminated: &v1.ContainerStateTerminated{
+									Reason: "AnotherReason",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getPodStatusReasonValue(tt.pod, reason)
+			if got != tt.want {
+				t.Errorf("getPodStatusReasonValue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+func TestKubePodTolerations_DeduplicatesDuplicateEntries_WithTolerationSeconds(t *testing.T) {
+	seconds1 := int64(3600)
+	seconds2 := int64(3600)
+	seconds3 := int64(1800)
+	secondsKey2 := int64(0)
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dup-tolerations-pod-ts",
+			Namespace: "default",
+			UID:       "testuid-ts",
+		},
+		Spec: v1.PodSpec{
+			Tolerations: []v1.Toleration{
+				{
+					Key:               "key1",
+					Operator:          v1.TolerationOpEqual,
+					Value:             "value1",
+					Effect:            v1.TaintEffectNoSchedule,
+					TolerationSeconds: &seconds1,
+				},
+				{
+					Key:               "key1",
+					Operator:          v1.TolerationOpEqual,
+					Value:             "value1",
+					Effect:            v1.TaintEffectNoSchedule,
+					TolerationSeconds: &seconds2, // same value as first, different pointer
+				},
+				{
+					Key:               "key1",
+					Operator:          v1.TolerationOpEqual,
+					Value:             "value1",
+					Effect:            v1.TaintEffectNoSchedule,
+					TolerationSeconds: &seconds3, // different value
+				},
+				{
+					Key:               "key2",
+					Operator:          v1.TolerationOpExists,
+					TolerationSeconds: &secondsKey2, // "0"
+				},
+				{
+					Key:               "key2",
+					Operator:          v1.TolerationOpExists,
+					TolerationSeconds: &secondsKey2, // duplicate of above by identity
+				},
+				{
+					Key:      "key2",
+					Operator: v1.TolerationOpExists,
+					// TolerationSeconds nil -> distinct from "0"
+				},
+			},
+		},
+	}
+
+	gen := createPodTolerationsFamilyGenerator()
+	fam := gen.Generate(pod)
+	if fam == nil {
+		t.Fatalf("expected non-nil metric family")
+	}
+
+	type metricKey struct {
+		key, operator, value, effect, tolerationSeconds string
+	}
+	metricsSeen := make(map[metricKey]struct{})
+
+	for _, m := range fam.Metrics {
+		lbls := map[string]string{}
+		for i, k := range m.LabelKeys {
+			lbls[k] = m.LabelValues[i]
+		}
+		km := metricKey{
+			key:               lbls["key"],
+			operator:          lbls["operator"],
+			value:             lbls["value"],
+			effect:            lbls["effect"],
+			tolerationSeconds: lbls["toleration_seconds"],
+		}
+		if _, exists := metricsSeen[km]; exists {
+			t.Errorf("duplicate toleration metric found: %+v", km)
+		}
+		metricsSeen[km] = struct{}{}
+	}
+
+	wantMetricCount := 4 // key1@3600, key1@1800, key2@0, key2@nil
+	if got := len(metricsSeen); got != wantMetricCount {
+		t.Errorf("expected %d unique toleration metrics, got %d", wantMetricCount, got)
 	}
 }

@@ -33,11 +33,13 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // Initialize common client auth plugins.
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
+	yaml "sigs.k8s.io/yaml/goyaml.v3"
 
 	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/oklog/run"
@@ -52,7 +54,6 @@ import (
 	"k8s.io/kube-state-metrics/v2/internal/discovery"
 	"k8s.io/kube-state-metrics/v2/internal/store"
 	"k8s.io/kube-state-metrics/v2/pkg/allowdenylist"
-	"k8s.io/kube-state-metrics/v2/pkg/customresource"
 	"k8s.io/kube-state-metrics/v2/pkg/customresourcestate"
 	generator "k8s.io/kube-state-metrics/v2/pkg/metric_generator"
 	"k8s.io/kube-state-metrics/v2/pkg/metricshandler"
@@ -61,6 +62,10 @@ import (
 	"k8s.io/kube-state-metrics/v2/pkg/util"
 	"k8s.io/kube-state-metrics/v2/pkg/util/proc"
 )
+
+// ClientGoVersion is the version for the client-go library used by KSM. This
+// value is set at build time using go build flags.
+var ClientGoVersion = "unknown"
 
 const (
 	metricsPath = "/metrics"
@@ -84,7 +89,10 @@ func RunKubeStateMetricsWrapper(ctx context.Context, opts *options.Options) erro
 // which implements customresource.RegistryFactory and pass all factories into this function.
 func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	ksmMetricsRegistry := prometheus.NewRegistry()
-	ksmMetricsRegistry.MustRegister(versionCollector.NewCollector("kube_state_metrics"))
+	ksmMetricsRegistry.MustRegister(versionCollector.NewCollector("kube_state_metrics", versionCollector.WithExtraConstLabels(
+		prometheus.Labels{"client_go_version": ClientGoVersion},
+	)))
+
 	durationVec := promauto.With(ksmMetricsRegistry).NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "http_request_duration_seconds",
@@ -114,6 +122,10 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 		Name: "kube_state_metrics_custom_resource_state_add_events_total",
 		Help: "Number of times that the CRD informer triggered the add event.",
 	})
+	crdsUpdateEventsCounter := promauto.With(ksmMetricsRegistry).NewCounter(prometheus.CounterOpts{
+		Name: "kube_state_metrics_custom_resource_state_update_events_total",
+		Help: "Number of times that the CRD informer triggered the update event.",
+	})
 	crdsDeleteEventsCounter := promauto.With(ksmMetricsRegistry).NewCounter(prometheus.CounterOpts{
 		Name: "kube_state_metrics_custom_resource_state_delete_events_total",
 		Help: "Number of times that the CRD informer triggered the remove event.",
@@ -124,29 +136,35 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	})
 	storeBuilder := store.NewBuilder()
 	storeBuilder.WithMetrics(ksmMetricsRegistry)
-
 	got := options.GetConfigFile(*opts)
 	if got != "" {
-		configFile, err := os.ReadFile(filepath.Clean(got))
-		if err != nil {
-			return fmt.Errorf("failed to read opts config file: %v", err)
-		}
-		// NOTE: Config value will override default values of intersecting options.
-		err = yaml.Unmarshal(configFile, opts)
-		if err != nil {
-			// DO NOT end the process.
-			// We want to allow the user to still be able to fix the misconfigured config (redeploy or edit the configmaps) and reload KSM automatically once that's done.
-			klog.ErrorS(err, "failed to unmarshal opts config file")
-			// Wait for the next reload.
-			klog.InfoS("misconfigured config detected, KSM will automatically reload on next write to the config")
-			klog.InfoS("waiting for config to be fixed")
-			configSuccess.WithLabelValues("config", filepath.Clean(got)).Set(0)
-			<-ctx.Done()
+		if _, err := os.Stat(filepath.Clean(got)); err != nil {
+			klog.ErrorS(err, "encountered error while processing the file", "file", got)
 		} else {
-			configSuccess.WithLabelValues("config", filepath.Clean(got)).Set(1)
-			configSuccessTime.WithLabelValues("config", filepath.Clean(got)).SetToCurrentTime()
-			hash := md5HashAsMetricValue(configFile)
-			configHash.WithLabelValues("config", filepath.Clean(got)).Set(hash)
+			configFile, err := os.ReadFile(filepath.Clean(got))
+			if err != nil {
+				return fmt.Errorf("failed to read opts config file: %v", err)
+			}
+			// NOTE: Config value will override default values of intersecting options.
+			err = yaml.Unmarshal(configFile, opts)
+
+			if err != nil {
+				// DO NOT end the process.
+				// We want to allow the user to still be able to fix the misconfigured config (redeploy or edit the configmaps) and reload KSM automatically once that's done.
+				klog.ErrorS(err, "failed to unmarshal opts config file")
+				// Wait for the next reload.
+				klog.InfoS("misconfigured config detected, KSM will automatically reload on next write to the config")
+				klog.InfoS("waiting for config to be fixed")
+				configSuccess.WithLabelValues("config", filepath.Clean(got)).Set(0)
+				<-ctx.Done()
+			} else {
+				configSuccess.WithLabelValues("config", filepath.Clean(got)).Set(1)
+				configSuccessTime.WithLabelValues("config", filepath.Clean(got)).SetToCurrentTime()
+				hash := md5HashAsMetricValue(configFile)
+				configHash.WithLabelValues("config", filepath.Clean(got)).Set(hash)
+			}
+			opts = configureResourcesAndMetrics(opts, configFile)
+			klog.InfoS("Using config file", "file", got)
 		}
 	}
 
@@ -175,25 +193,22 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 		return err
 	}
 
-	var factories []customresource.RegistryFactory
-
 	if opts.CustomResourceConfigFile != "" {
-		crcFile, err := os.ReadFile(filepath.Clean(opts.CustomResourceConfigFile))
-		if err != nil {
-			return fmt.Errorf("failed to read custom resource config file: %v", err)
+		if _, err := os.Stat(filepath.Clean(opts.CustomResourceConfigFile)); err != nil {
+			klog.ErrorS(err, "encountered error while processing the file", "file", opts.CustomResourceConfigFile)
+		} else {
+			crcFile, err := os.ReadFile(filepath.Clean(opts.CustomResourceConfigFile))
+			if err != nil {
+				return fmt.Errorf("failed to read custom resource config file: %v", err)
+			}
+			configSuccess.WithLabelValues("customresourceconfig", filepath.Clean(opts.CustomResourceConfigFile)).Set(1)
+			configSuccessTime.WithLabelValues("customresourceconfig", filepath.Clean(opts.CustomResourceConfigFile)).SetToCurrentTime()
+			hash := md5HashAsMetricValue(crcFile)
+			configHash.WithLabelValues("customresourceconfig", filepath.Clean(opts.CustomResourceConfigFile)).Set(hash)
 		}
-		configSuccess.WithLabelValues("customresourceconfig", filepath.Clean(opts.CustomResourceConfigFile)).Set(1)
-		configSuccessTime.WithLabelValues("customresourceconfig", filepath.Clean(opts.CustomResourceConfigFile)).SetToCurrentTime()
-		hash := md5HashAsMetricValue(crcFile)
-		configHash.WithLabelValues("customresourceconfig", filepath.Clean(opts.CustomResourceConfigFile)).Set(hash)
-
 	}
 
-	resources := make([]string, len(factories))
-
-	for i, factory := range factories {
-		resources[i] = factory.Name()
-	}
+	resources := []string{}
 
 	switch {
 	case len(opts.Resources) == 0 && !opts.CustomResourcesOnly:
@@ -254,6 +269,7 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	))
 
 	storeBuilder.WithUsingAPIServerCache(opts.UseAPIServerCache)
+	storeBuilder.WithObjectLimit(opts.ObjectLimit)
 	storeBuilder.WithGenerateStoresFunc(storeBuilder.DefaultGenerateStoresFunc())
 	proc.StartReaper()
 
@@ -268,9 +284,12 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	if err := storeBuilder.WithAllowAnnotations(opts.AnnotationsAllowList); err != nil {
 		return fmt.Errorf("failed to set up annotations allowlist: %v", err)
 	}
+	klog.InfoS("Using annotations allowlist", "annotationsAllowList", opts.AnnotationsAllowList)
+
 	if err := storeBuilder.WithAllowLabels(opts.LabelsAllowList); err != nil {
 		return fmt.Errorf("failed to set up labels allowlist: %v", err)
 	}
+	klog.InfoS("Using labels allowlist", "labelsAllowList", opts.LabelsAllowList)
 
 	ksmMetricsRegistry.MustRegister(
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -286,14 +305,12 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 		opts.EnableGZIPEncoding,
 	)
 	// Run MetricsHandler
-	if config == nil {
-		ctxMetricsHandler, cancel := context.WithCancel(ctx)
-		g.Add(func() error {
-			return m.Run(ctxMetricsHandler)
-		}, func(error) {
-			cancel()
-		})
-	}
+	ctxMetricsHandler, cancel := context.WithCancel(ctx)
+	g.Add(func() error {
+		return m.Run(ctxMetricsHandler)
+	}, func(error) {
+		cancel()
+	})
 
 	tlsConfig := opts.TLSConfig
 
@@ -301,9 +318,12 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	if config != nil {
 		discovererInstance := &discovery.CRDiscoverer{
 			CRDsAddEventsCounter:    crdsAddEventsCounter,
+			CRDsUpdateEventsCounter: crdsUpdateEventsCounter,
 			CRDsDeleteEventsCounter: crdsDeleteEventsCounter,
 			CRDsCacheCountGauge:     crdsCacheCountGauge,
 		}
+		// storeBuilder starts reflectors for the discovered GVKs, and as such, should close them too.
+		storeBuilder.GVKToReflectorStopChanMap = &discovererInstance.GVKToReflectorStopChanMap
 		// This starts a goroutine that will watch for any new GVKs to extract from CRDs.
 		err = discovererInstance.StartDiscovery(ctx, kubeConfig)
 		if err != nil {
@@ -324,18 +344,17 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 		)
 	}
 
-	telemetryMux := buildTelemetryServer(ksmMetricsRegistry)
+	telemetryMux := buildTelemetryServer(ksmMetricsRegistry, opts.AuthFilter, kubeConfig)
 	telemetryListenAddress := net.JoinHostPort(opts.TelemetryHost, strconv.Itoa(opts.TelemetryPort))
 	telemetryServer := http.Server{
 		Handler:           telemetryMux,
 		ReadHeaderTimeout: 5 * time.Second}
 	telemetryFlags := web.FlagConfig{
 		WebListenAddresses: &[]string{telemetryListenAddress},
-		WebSystemdSocket:   new(bool),
 		WebConfigFile:      &tlsConfig,
 	}
 
-	metricsMux := buildMetricsServer(m, durationVec, kubeClient)
+	metricsMux := buildMetricsServer(m, durationVec, kubeClient, opts.AuthFilter, kubeConfig)
 	metricsServerListenAddress := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
 	metricsServer := http.Server{
 		Handler:           metricsMux,
@@ -346,7 +365,6 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	}
 	metricsFlags := web.FlagConfig{
 		WebListenAddresses: &[]string{metricsServerListenAddress},
-		WebSystemdSocket:   new(bool),
 		WebConfigFile:      &tlsConfig,
 	}
 
@@ -384,14 +402,86 @@ func RunKubeStateMetrics(ctx context.Context, opts *options.Options) error {
 	return nil
 }
 
-func buildTelemetryServer(registry prometheus.Gatherer) *http.ServeMux {
+func configureResourcesAndMetrics(opts *options.Options, configFile []byte) *options.Options {
+	// If the config file is set, we will overwrite the opts with the config file.
+	// This is only needed for maps because the default behaviour of yaml.Unmarshal is to append keys (and overwrite any conflicting ones).
+	config := options.NewOptions()
+	err := yaml.Unmarshal(configFile, &config)
+	if err == nil {
+		if len(config.Resources) > 0 {
+			opts.Resources = options.ResourceSet{}
+			for resource := range config.Resources {
+				opts.Resources[resource] = struct{}{}
+			}
+		}
+
+		if len(config.MetricAllowlist) > 0 {
+			opts.MetricAllowlist = options.MetricSet{}
+			for metric := range config.MetricAllowlist {
+				opts.MetricAllowlist[metric] = struct{}{}
+			}
+		}
+
+		if len(config.MetricDenylist) > 0 {
+			opts.MetricDenylist = options.MetricSet{}
+			for metric := range config.MetricDenylist {
+				opts.MetricDenylist[metric] = struct{}{}
+			}
+		}
+
+		if len(config.MetricOptInList) > 0 {
+			opts.MetricOptInList = options.MetricSet{}
+			for metric := range config.MetricOptInList {
+				opts.MetricOptInList[metric] = struct{}{}
+			}
+		}
+
+		if len(config.LabelsAllowList) > 0 {
+			opts.LabelsAllowList = options.LabelsAllowList{}
+			for label, value := range config.LabelsAllowList {
+				opts.LabelsAllowList[label] = value
+			}
+		}
+
+		if len(config.AnnotationsAllowList) > 0 {
+			opts.AnnotationsAllowList = options.LabelsAllowList{}
+			for annotation, value := range config.AnnotationsAllowList {
+				opts.AnnotationsAllowList[annotation] = value
+			}
+		}
+	} else {
+		klog.ErrorS(err, "failed to unmarshal configFile")
+	}
+	return opts
+}
+
+func buildTelemetryServer(registry prometheus.Gatherer, authFilter bool, kubeConfig *rest.Config) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	handler := logr.ToSlogHandler(klog.Background())
-	sLogger := slog.NewLogLogger(handler, slog.LevelError)
+	loghandler := logr.ToSlogHandler(klog.Background())
+	sLogger := slog.NewLogLogger(loghandler, slog.LevelError)
 
 	// Add metricsPath
-	mux.Handle(metricsPath, promhttp.HandlerFor(registry, promhttp.HandlerOpts{ErrorLog: sLogger}))
+	metricsHandler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{ErrorLog: sLogger})
+
+	// Add Authentication/Authorization via Kubernetes API
+	if authFilter {
+		client, err := rest.HTTPClientFor(kubeConfig)
+		if err != nil {
+			klog.ErrorS(err, "failed to create HTTP client from config")
+		}
+
+		metricsFilter, err := filters.WithAuthenticationAndAuthorization(kubeConfig, client)
+		if err != nil {
+			klog.ErrorS(err, "failed to create auth handler")
+		}
+
+		metricsHandler, err = metricsFilter(klog.Background(), metricsHandler)
+		if err != nil {
+			klog.ErrorS(err, "failed to apply metrics filter")
+		}
+	}
+	mux.Handle(metricsPath, metricsHandler)
 
 	// Add readyzPath
 	mux.Handle(readyzPath, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -410,6 +500,7 @@ func buildTelemetryServer(registry prometheus.Gatherer) *http.ServeMux {
 		Name:        "kube-state-metrics",
 		Description: "Self-metrics for kube-state-metrics",
 		Version:     version.Info(),
+		Profiling:   "false",
 		Links: []web.LandingLinks{
 			{
 				Address: metricsPath,
@@ -429,6 +520,9 @@ func handleClusterDelegationForProber(client kubernetes.Interface, probeType str
 	return func(w http.ResponseWriter, _ *http.Request) {
 		got := client.CoreV1().RESTClient().Get().AbsPath(probeType).Do(context.Background())
 		if got.Error() != nil {
+			var statusCode int
+			got.StatusCode(&statusCode)
+			klog.Warningf("Failed to contact API server for %s: got %d", probeType, statusCode)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(http.StatusText(http.StatusServiceUnavailable)))
 			return
@@ -438,7 +532,7 @@ func handleClusterDelegationForProber(client kubernetes.Interface, probeType str
 	}
 }
 
-func buildMetricsServer(m *metricshandler.MetricsHandler, durationObserver prometheus.ObserverVec, client kubernetes.Interface) *http.ServeMux {
+func buildMetricsServer(m *metricshandler.MetricsHandler, durationObserver prometheus.ObserverVec, client kubernetes.Interface, authFilter bool, kubeConfig *rest.Config) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// TODO: This doesn't belong into serveMetrics
@@ -449,7 +543,29 @@ func buildMetricsServer(m *metricshandler.MetricsHandler, durationObserver prome
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	// Add metricsPath
-	mux.Handle(metricsPath, promhttp.InstrumentHandlerDuration(durationObserver, m))
+	metricsHandler := promhttp.InstrumentHandlerDuration(durationObserver, m)
+
+	// Add Authentication/Authorization via Kubernetes API
+	if authFilter {
+		client, err := rest.HTTPClientFor(kubeConfig)
+		if err != nil {
+			klog.ErrorS(err, "failed to create HTTP client from config")
+		}
+
+		metricsFilter, err := filters.WithAuthenticationAndAuthorization(kubeConfig, client)
+		if err != nil {
+			klog.ErrorS(err, "failed to create auth handler")
+		}
+
+		handler, err := metricsFilter(klog.Background(), metricsHandler)
+		if err != nil {
+			klog.ErrorS(err, "failed to apply metrics filter")
+		}
+		metricsHandler = handler.(http.HandlerFunc)
+
+	}
+
+	mux.Handle(metricsPath, metricsHandler)
 
 	// Add livezPath
 	mux.Handle(livezPath, handleClusterDelegationForProber(client, livezPath))
@@ -504,11 +620,17 @@ func resolveCustomResourceConfig(opts *options.Options) (customresourcestate.Con
 		return yaml.NewDecoder(strings.NewReader(s)), nil
 	}
 	if file := opts.CustomResourceConfigFile; file != "" {
-		f, err := os.Open(filepath.Clean(file))
-		if err != nil {
-			return nil, fmt.Errorf("Custom Resource State Metrics file could not be opened: %v", err)
+		if opts.ContinueWithoutCustomResourceConfigFile {
+			if _, err := os.Stat(filepath.Clean(file)); err != nil {
+				klog.Warningf("Failed to open Custom Resource State Metrics file %s: %v, ignoring", file, err)
+			}
+		} else {
+			f, err := os.Open(filepath.Clean(file))
+			if err != nil {
+				return nil, fmt.Errorf("unable to open Custom Resource State Metrics file: %v", err)
+			}
+			return yaml.NewDecoder(f), nil
 		}
-		return yaml.NewDecoder(f), nil
 	}
 	return nil, nil
 }

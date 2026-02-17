@@ -1,6 +1,103 @@
+# Changelog
+
+## v2.18.0 / 2026-01-11
+
+NOTE: This release addresses a regression that caused a panic when new versions were added to existing `CustomResourceDefinition`s. See the post-mortem analysis in <https://github.com/kubernetes/kube-state-metrics/pull/2838> for more details.
+NOTE: `endpointslices` are now part of the default resources exposed as metrics. `endpoints` is deprecated and needs to be manually activated through the `--resources` flag. See <https://github.com/kubernetes/kube-state-metrics/pull/2659> for more details.
+
+* This release builds with Go `v1.25.6`
+* This release builds with `k8s.io/client-go`: `v0.34.3`
+
+* [CHANGE] Replace endpoints with endpointslices as default resource by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2659>
+* [BUGFIX] Fix regression: React on WATCH updates for CRD informer by @rexagod in <https://github.com/kubernetes/kube-state-metrics/pull/2838>
+* [BUGFIX] Deduplicate tolerations when generating `kube_pod_tolerations` by @bhope in <https://github.com/kubernetes/kube-state-metrics/pull/2835>
+* [FEATURE] Allow filtering resources via URL parameters by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2844>
+* [FEATURE] Add `kube_job_status_ready` metric by @nmn3m in <https://github.com/kubernetes/kube-state-metrics/pull/2771>
+* [FEATURE] Add `kube_deployment_owner` metric by @nmn3m in <https://github.com/kubernetes/kube-state-metrics/pull/2782>
+* [FEATURE] Add `kube_deployment_status_replicas_terminating` and `kube_replicaset_status_terminating_replicas` metrics by @atiratree in <https://github.com/kubernetes/kube-state-metrics/pull/2708>
+* [FEATURE] Promote CronJob, HPA, and Pod metrics from BETA to STABLE by @nmn3m in <https://github.com/kubernetes/kube-state-metrics/pull/2798>
+* [FEATURE] Promote StatefulSet metrics to STABLE by @yasicar in <https://github.com/kubernetes/kube-state-metrics/pull/2783>
+* [FEATURE] Add info metric for client-go version by @fpetkovski in <https://github.com/kubernetes/kube-state-metrics/pull/2739>
+* [FEATURE] Warn on probe failing by @mickael-carl in <https://github.com/kubernetes/kube-state-metrics/pull/2808>
+* [ENHANCEMENT] Add `failed` condition to `kube_certificatesigningrequest_condition` by @ksmiley in <https://github.com/kubernetes/kube-state-metrics/pull/2841>
+* [ENHANCEMENT] Reduce allocations when creating metric families by @fpetkovski in <https://github.com/kubernetes/kube-state-metrics/pull/2807>
+* [ENHANCEMENT] Bump to kubernetes 1.34 by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2785>
+* [ENHANCEMENT] Bump exporter-toolkit by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2770>
+* [ENHANCEMENT] Replace gojsontoyaml with gojq by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2660>
+* [ENHANCEMENT] Split benchmarks by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2759>
+
+## v2.17.0 / 2025-09-01
+
+* This release builds with Go `v1.24.6`
+* This release builds with `k8s.io/client-go`: `v0.33.4`
+* This release is the last release that has endpoint metrics enabled by default. In the next release we will enable endpointslices metrics and disable endpoint metrics by default, since the endpoint resources are deprecated. You can still alter this behaviour in kube-state-metrics' config.
+
+* [FEATURE] Add new metric for pod unscheduled time tracking by @yshngg in <https://github.com/kubernetes/kube-state-metrics/pull/2699>
+* [BUGFIX] Fix index out of range by @taraspos in <https://github.com/kubernetes/kube-state-metrics/pull/2716>
+* [BUGFIX] Config file overrides apply to some fields but not other by @rashmichandrashekar in <https://github.com/kubernetes/kube-state-metrics/pull/2705>
+* [BUGFIX] Fix logic for plain text fallback format by @timonegk in <https://github.com/kubernetes/kube-state-metrics/pull/2730>
+* [FEATURE] Include reason label to `kube_deployment_status_condition` by @Rishab87 in <https://github.com/kubernetes/kube-state-metrics/pull/2719>
+* [FEATURE] Continue running kube-state-metrics when config file doesnt exist at startup by @rashmichandrashekar in <https://github.com/kubernetes/kube-state-metrics/pull/2703>
+* [FEATURE] Introduce deletion timestamp metric for daemonset, statefulset, deployment, service and pdb by @IgorIgnatevBolt in <https://github.com/kubernetes/kube-state-metrics/pull/2678>
+* [FEATURE] Add HorizontalPodAutoscaler created and deletionTimestamp info into metrics by @IgorIgnatevBolt in <https://github.com/kubernetes/kube-state-metrics/pull/2675>
+
+## v2.16.0 / 2025-06-23
+
+**Note:**
+
+* This release builds with Golang `v1.24.4`
+* This release builds with `k8s.io/client-go`: `v0.32.6`
+
+* [FEATURE] Add a `reclaim_policy` label to the `kube_persistentvolume_info` metric by @SuperQ in <https://github.com/kubernetes/kube-state-metrics/pull/2615>
+* [FEATURE] Use dlclark/regexp2 over standard library's package to support lookarounds by @rexagod in <https://github.com/kubernetes/kube-state-metrics/pull/2616>
+* [BUGFIX] Report correct values in `kube_pod_status_reason` metric by @carlosmorenokm1 in <https://github.com/kubernetes/kube-state-metrics/pull/2644>
+* [FEATURE] Add add `pathType` to `kube_ingress_path` by @rexagod in <https://github.com/kubernetes/kube-state-metrics/pull/2670>
+* [FEATURE] Introduce object limits by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2626>
+* [BUGFIX] Close reflectors once their corresponding CRDs are dropped by @rexagod in <https://github.com/kubernetes/kube-state-metrics/pull/2672>
+* [FEATURE] Incorporate `WithAuthenticationAndAuthorization` to support endpoint authn/z by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2686>
+
+## v2.15.0 / 2025-02-03
+
+**Note:**
+
+* This release builds with Golang `v1.23.5`
+* This release builds with `k8s.io/client-go`: `v0.32.1`
+
+* [BUGFIX] Fix CR cache for GVK all specified case by @chelseychen in <https://github.com/kubernetes/kube-state-metrics/pull/2567>
+* [BUGFIX] Deduplicate tolerations before creating metric by @RiRa12621 in <https://github.com/kubernetes/kube-state-metrics/pull/2559>
+* [BUGFIX] Make `$VERSION` 3rd-party independant by @rexagod in <https://github.com/kubernetes/kube-state-metrics/pull/2572>
+* [BUGFIX] Fix NoNodePod naming in jsonnet by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2598>
+* [BUGFIX] Panic in `util.GVRFromType` for structured types by @L3n41c in <https://github.com/kubernetes/kube-state-metrics/pull/2553>
+* [FEATURE] Add external traffic policy to kube_service_info by @jahantech in <https://github.com/kubernetes/kube-state-metrics/pull/2584>
+* [FEATURE] Promote kube_statefulset_ordinals_start from ALPHA -> STABLE by @pwschuurman in <https://github.com/kubernetes/kube-state-metrics/pull/2415>
+* [FEATURE] Add timezone to kube_cronjob_info / Make kube_cronjob_next_schedule_time timezone-aware by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2376>
+
+## v2.14.0 / 2024-11-08
+
+**Note:**
+
+* This release builds with Golang `v1.23.3`
+* This release builds with `k8s.io/client-go`: `v0.31.2`
+* This release removes `kube_endpoint_address_not_ready` and `kube_endpoint_address_available` which have been deprecated in 2022. Please use `kube_endpoint_address`as a replacement.
+
+* [BUGFIX] Use --track-unscheduled-pods to select unscheduled pods in Daemonset sharding by @CatherineF-dev in <https://github.com/kubernetes/kube-state-metrics/pull/2388>
+* [BUGFIX] Install tools so VERSION gets set by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2456>
+* [BUGFIX] Syntax errors in kube-state-metrics.libsonnet by @jeffmccune in <https://github.com/kubernetes/kube-state-metrics/pull/2454>
+* [BUGFIX] Set kube_job_status_failed metric even when there are no job.Status.Conditions present by @richabanker in <https://github.com/kubernetes/kube-state-metrics/pull/2485>
+* [BUGFIX] de-duplication of custom resource metrics by @bartlettc22 in <https://github.com/kubernetes/kube-state-metrics/pull/2502>
+* [BUGFIX] Configure sharding every time MetricsHandler.Run runs by @wallee94 in <https://github.com/kubernetes/kube-state-metrics/pull/2478>
+* [BUGFIX] Panic in `util.GVRFromType` for core objects by @L3n41c in <https://github.com/kubernetes/kube-state-metrics/pull/2535>
+* [BUGFIX] Big memory value overflow by @leiwingqueen in <https://github.com/kubernetes/kube-state-metrics/pull/2540>
+* [BUGFIX] Expose empty labels by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2539>
+* [BUGFIX] CustomResourceMetrics: Convert status condition Unknown to a valid value by @Haleygo in <https://github.com/kubernetes/kube-state-metrics/pull/2536>
+* [CHANGE] Remove deprecated endpoint address metric by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2527>
+* [FEATURE] Add new metric kube_job_status_suspended by @Indresh2410 in <https://github.com/kubernetes/kube-state-metrics/pull/2542>
+* [FEATURE] Move endpoint ports into address metric by @mrueg in <https://github.com/kubernetes/kube-state-metrics/pull/2503>
+* [ENHANCEMENT] Use concurrent map when storing metrics by @rarruda in <https://github.com/kubernetes/kube-state-metrics/pull/2510>
+
 ## v2.13.0 / 2024-07-18
 
-### Note
+**Note:**
 
 * This release builds with Golang `v1.22.5`.
 * This release builds with `k8s.io/client-go`: `v0.30.3`.
@@ -15,7 +112,7 @@
 
 ## v2.12.0 / 2024-04-02
 
-### Note
+**Note:**
 
 * This release addresses a critical issue where scraping the exposition data for certain types caused metrics-backends to crash: <https://github.com/kubernetes/kube-state-metrics/issues/2248>.
 * This release builds with `k8s.io/client-go`: `v0.29.3`.
@@ -26,7 +123,7 @@
 
 ## v2.11.0 / 2024-03-04
 
-### Note
+**Note:**
 
 This release builds with Golang `v1.21.8`.
 
@@ -43,7 +140,7 @@ This release builds with Golang `v1.21.8`.
 
 ## v2.10.1 / 2023-10-09
 
-### Note
+**Note:**
 
 * This release addresses a regression introduced in [#2105](https://github.com/kubernetes/kube-state-metrics/pull/2105).
 
@@ -52,7 +149,7 @@ This release builds with Golang `v1.21.8`.
 
 ## v2.10.0 / 2023-08-31
 
-### Note
+**Note:**
 
 * Label and annotation metrics aren't exposed by default anymore to reduce the memory usage of the default configuration of kube-state-metrics. Before this change, they used to only include the name and namespace of the objects which is not relevant to users not opting in these metrics.
 
@@ -85,7 +182,7 @@ This release does not incorporate any user-facing changes. Re-running release pr
 
 The changes mentioned below are only the user-facing ones. For a list of the complete set of changes, refer the changelog associated with the release tag.
 
-### Note
+**Note:**
 
 * The deprecated experimental VerticalPodAutoscaler metrics are no longer supported, and have been removed. We recommend to use CustomResourceState metrics to gather metrics from custom resources like the Vertical Pod Autoscaler.
 * #2004 regulated label names to adhere with [OTel-Prometheus standards](https://github.com/open-telemetry/opentelemetry-specification/blob/8946dfc6a2302f78b0224fcc3f4dfb816a7bb1f4/specification/compatibility/prometheus_and_openmetrics.md?plain=1#L224-L229), so existing label names that do not follow the same may be replaced by the ones that do. Please refer to the PR for more details.
